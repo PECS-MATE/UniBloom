@@ -1,0 +1,68 @@
+{
+  "version": "card-image-guidelines-v3-rules-only",
+  "source": "User-supplied production rules dated 2026-10-31; common and rendering rules only, fixed scenes excluded per user request 2026-11-18.",
+  "base": {
+    "id": "aac-common",
+    "rules": [
+      "Create exactly ONE square 1:1 AAC card depicting one concept; no collage, split panels or sequence.",
+      "Production target: 1024x1024 PNG in sRGB, opaque pure white #ffffff background. No cream, mint, gradients, decorative background or checkerboard.",
+      "Keep approximately 10% safety margin on all sides; central subject starts at 65–75% of image dimensions. Keep fingertips, tools and permitted arrows inside the margin.",
+      "No words, letters, sentences, numerals, brands, logos, watermarks, card frames, UI buttons, selection checks or mascot/animal/brand characters. Semantic symbols are allowed ONLY when explicitly required by the retrieved scene.",
+      "Preserve the natural identifying colors of objects; do not tint every object mint. UI colors are not a restriction on image colors.",
+      "Do not invent a cause, attacker, location, person or extra object. Do not equate refusal with anger or aggression. No blood, large wounds or frightening injury scenes.",
+      "Use no actual child face, address, institution name or contact details in shared cards. Do not invent an identifiable family member as a replacement for a real relative.",
+      "Create an independent depiction; do not reproduce another site’s copyrighted picture symbol. Do not alter existing card identity, wording or RFID mapping.",
+      "Keep objects/actions distinct: water versus drinking, rice versus eating, stop versus waiting versus a brief pause; satisfaction versus yes versus conversational confirmation."
+    ]
+  },
+  "profiles": [
+    {
+      "id": "photo",
+      "categories": [
+        "음식",
+        "음식과 음료",
+        "사물",
+        "물건"
+      ],
+      "keywords": [
+        "물컵",
+        "연필",
+        "물병"
+      ],
+      "rules": [
+        "Photographic object mode A: natural photo-like isolated subject with realistic shape, inherent color, proportions and material. No people or cartoon faces.",
+        "No cartoon outline, anthropomorphic eyes/mouth, exaggerated 3D toy styling, pedestal, tabletop, background props, decorative highlights or heavy shadow; use simple even lighting.",
+        "This is a generated photo-like proposal, not a real photograph of the child’s actual belongings."
+      ]
+    },
+    {
+      "id": "symbol",
+      "categories": [
+        "행동",
+        "동작",
+        "사람",
+        "장소",
+        "감정",
+        "몸 상태",
+        "신체",
+        "신체 부위",
+        "복구 표현"
+      ],
+      "keywords": [],
+      "rules": [
+        "Pictogram mode B: simple soft 2D people/body parts/objects, not a photograph or photorealistic 3D.",
+        "Use consistent dark outlines and simple natural flat colors; no gloss, gradients, texture, heavy shadow or decorative detail. Start with 8–12px outlines at 1024px, but prioritize the approved people-card style over arbitrary thickness.",
+        "Use body parts and minimal objects first. Add upper/full body or another person only when posture, expression or relationship requires it. Keep hands, fingers and joints natural; do not assume gender or specific appearance is necessary for meaning.",
+        "Keep a consistent people-pictogram style, skin-color treatment, proportions and plain clothing; reduce excessive wrinkles, nails and lip texture without losing contact and direction.",
+        "Show contact, direction and posture clearly in one still scene. Never replace an action with its object alone. Use a small confirmation/cancel mark, question mark or arrow only when the specific scene requires it."
+      ]
+    }
+  ],
+  "photo_labels": [
+    "물",
+    "밥",
+    "사과",
+    "우유",
+    "간식"
+  ]
+}

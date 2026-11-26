@@ -1,0 +1,219 @@
+"""Ollama-backed Korean sentence generation with a safe local fallback."""
+import json
+import logging
+import math
+import os
+import re
+from http.client import HTTPException as HTTPClientError
+from threading import BoundedSemaphore, Event
+from time import perf_counter
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from app.services.sentence_policy import policy_versions, system_prompt
+
+logger = logging.getLogger('uvicorn.error')
+
+SELF_REFERENCE = re.compile(r'(?<![가-힣])(나|저)(는|가|를|도)(?![가-힣])')
+_model_gate = BoundedSemaphore(1)
+_warming = Event()
+
+
+def enabled():
+    if provider() == 'openrouter':
+        return bool(os.environ.get('OPENROUTER_API_KEY', '').strip())
+    return os.environ.get('OLLAMA_ENABLED', 'false').lower() in {'1', 'true', 'yes', 'on'}
+
+
+def provider():
+    return os.environ.get('SENTENCE_PROVIDER', 'ollama').strip()
+
+
+def warmup_enabled():
+    if provider() == 'openrouter':
+        return False
+    return os.environ.get('OLLAMA_WARMUP_ENABLED', 'true').lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _integer_setting(name, default, minimum, maximum):
+    try:
+        return max(minimum, min(maximum, int(os.environ.get(name, str(default)))))
+    except ValueError:
+        return default
+
+
+def _timeout(name, default):
+    try:
+        value = float(os.environ.get(name, str(default)))
+        return value if math.isfinite(value) and 0 < value <= 120 else default
+    except ValueError:
+        return default
+
+
+def _settings():
+    if provider() == 'openrouter':
+        return {
+            'model': os.environ.get('OPENROUTER_MODEL', 'qwen/qwen3-30b-a3b-instruct-2507'),
+            'num_predict': _integer_setting('OPENROUTER_MAX_TOKENS', 96, 32, 128),
+        }
+    keep_alive = os.environ.get('OLLAMA_KEEP_ALIVE', '30m').strip()
+    if re.fullmatch(r'-?\d+', keep_alive):
+        keep_alive = int(keep_alive)
+    return {
+        'model': os.environ.get('OLLAMA_MODEL', 'qwen2.5:0.5b'),
+        'keep_alive': keep_alive,
+        'num_ctx': _integer_setting('OLLAMA_NUM_CTX', 2048, 1024, 8192),
+        'num_predict': _integer_setting('OLLAMA_NUM_PREDICT', 60, 32, 128),
+    }
+
+
+def _request(payload):
+    base_url = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434').rstrip('/')
+    return Request(f'{base_url}/api/generate',
+                   data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+                   headers={'Content-Type': 'application/json'}, method='POST')
+
+
+def _sentence_prompt(labels, fallback):
+    subject_rule = ('나/저 카드를 골랐으므로 반드시 저는을 넣으세요.'
+                    if any(label.strip() in {'나', '저'} for label in labels)
+                    else '나/저 카드가 없으므로 주어를 추가하지 마세요.')
+    return (
+        '선택 카드의 뜻을 유지해 짧은 존댓말 한 문장만 출력하세요.\n'
+        f'{subject_rule} 참고 문장이 자연스러우면 그대로 쓰세요.\n'
+        f"카드: {json.dumps(labels, ensure_ascii=False, separators=(',', ':'))}\n참고: {fallback}\n문장:"
+    )
+
+
+def warmup():
+    """Prepare the model and shared prompt prefix without user cards or startup blocking."""
+    if not enabled() or not warmup_enabled() or not _model_gate.acquire(blocking=False):
+        return False
+    _warming.set()
+    try:
+        settings = _settings()
+        payload = {'model': settings['model'], 'system': system_prompt(),
+                   'prompt': _sentence_prompt([], ''), 'stream': False, 'think': False,
+                   'keep_alive': settings['keep_alive'],
+                   'options': {'num_ctx': settings['num_ctx'], 'num_predict': 1, 'temperature': 0.1}}
+        with urlopen(_request(payload), timeout=_timeout('OLLAMA_WARMUP_TIMEOUT_SECONDS', 30)) as response:
+            result = json.load(response)
+        if not isinstance(result, dict) or result.get('done') is not True or result.get('error'):
+            raise ValueError('유효하지 않은 모델 준비 응답')
+        return True
+    except (HTTPClientError, HTTPError, URLError, TimeoutError, ValueError, OSError) as exc:
+        logger.warning('MODEL | WARMUP | 모델 사전 준비 실패 (%s)', type(exc).__name__)
+        return False
+    finally:
+        _warming.clear()
+        _model_gate.release()
+
+
+def _performance(metrics, started, status, result=None):
+    if metrics is None:
+        return
+    metrics.update(status=status, elapsed_ms=round((perf_counter() - started) * 1000, 1))
+    if not isinstance(result, dict):
+        return
+    for source, target in (
+        ('total_duration', 'model_total_ms'), ('load_duration', 'load_ms'),
+        ('prompt_eval_duration', 'prompt_ms'), ('eval_duration', 'decode_ms'),
+    ):
+        value = result.get(source)
+        if type(value) is int and value >= 0:
+            metrics[target] = round(value / 1_000_000, 1)
+    for source, target in (('prompt_eval_count', 'input_tokens'), ('eval_count', 'output_tokens')):
+        value = result.get(source)
+        if type(value) is int and value >= 0:
+            metrics[target] = value
+
+
+def _valid_response(text, labels):
+    if not text or len(text) > 150 or '\n' in text or '/' in text:
+        return False
+    has_self_card = any(label.strip() in {'나', '저'} for label in labels)
+    return has_self_card or not SELF_REFERENCE.search(text)
+
+
+def generate_sentence(labels, fallback, *, metrics=None):
+    started = perf_counter()
+    if not enabled():
+        _performance(metrics, started, 'disabled')
+        return fallback, 'rule'
+    if not _model_gate.acquire(blocking=False):
+        _performance(metrics, started, 'warming_up' if _warming.is_set() else 'busy')
+        return fallback, 'rule'
+    try:
+        if provider() == 'openrouter':
+            return _generate_openrouter(labels, fallback, metrics, started)
+        settings = _settings()
+        payload = {
+            'model': settings['model'], 'stream': False, 'think': False,
+            'keep_alive': settings['keep_alive'], 'system': system_prompt(),
+            'prompt': _sentence_prompt(labels, fallback),
+            'options': {'temperature': 0.1, 'num_ctx': settings['num_ctx'],
+                        'num_predict': settings['num_predict'], 'stop': ['\n']},
+        }
+        with urlopen(_request(payload), timeout=_timeout('OLLAMA_TIMEOUT_SECONDS', 10)) as response:
+            result = json.load(response)
+        _performance(metrics, started, 'invalid_response', result)
+        if (not isinstance(result, dict) or result.get('done') is not True
+                or result.get('done_reason') == 'length' or not isinstance(result.get('response'), str)):
+            raise ValueError('완성되지 않은 모델 응답')
+        text = result['response'].strip().strip('"')
+        if not _valid_response(text, labels):
+            raise ValueError('유효하지 않은 모델 응답')
+        _performance(metrics, started, 'generated', result)
+        return text, 'ollama'
+    except (HTTPClientError, HTTPError, URLError, TimeoutError, ValueError, OSError) as exc:
+        _performance(metrics, started, 'invalid_response' if isinstance(exc, ValueError) else 'unavailable')
+        logger.warning('MODEL | FALLBACK | 규칙 기반 문장 사용 (%s)', type(exc).__name__)
+        return fallback, 'rule'
+    finally:
+        _model_gate.release()
+
+
+def status():
+    settings = _settings()
+    return {'enabled': enabled(), 'provider': provider(), 'model': settings.pop('model'),
+            'policy_versions': policy_versions(), 'settings': settings,
+            'warmup_enabled': warmup_enabled(), 'warming_up': _warming.is_set()}
+
+
+def _generate_openrouter(labels, fallback, metrics, started):
+    settings = _settings()
+    payload = {
+        'model': settings['model'], 'stream': False, 'temperature': 0.1,
+        'max_tokens': settings['num_predict'], 'reasoning': {'enabled': False},
+        'messages': [
+            {'role': 'system', 'content': system_prompt()},
+            {'role': 'user', 'content': _sentence_prompt(labels, fallback)},
+        ],
+        'provider': {'sort': 'latency', 'max_price': {'prompt': 0.5, 'completion': 1}},
+    }
+    request = Request('https://openrouter.ai/api/v1/chat/completions',
+                      data=json.dumps(payload, ensure_ascii=False).encode('utf-8'), method='POST',
+                      headers={'Content-Type': 'application/json',
+                               'Authorization': 'Bearer ' + os.environ['OPENROUTER_API_KEY'].strip()})
+    with urlopen(request, timeout=_timeout('OPENROUTER_TIMEOUT_SECONDS', 8)) as response:
+        body = response.read(65537)
+    if len(body) > 65536:
+        raise ValueError('Oversized model response')
+    result = json.loads(body)
+    choices = result.get('choices') if isinstance(result, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise ValueError('Missing model response')
+    choice = choices[0]
+    message = choice.get('message')
+    if choice.get('finish_reason') != 'stop' or not isinstance(message, dict) or not isinstance(message.get('content'), str):
+        raise ValueError('Incomplete model response')
+    text = message['content'].strip().strip('"')
+    if not _valid_response(text, labels):
+        raise ValueError('Invalid model response')
+    _performance(metrics, started, 'generated')
+    usage = result.get('usage', {})
+    if metrics is not None and isinstance(usage, dict):
+        for source, target in (('prompt_tokens', 'input_tokens'), ('completion_tokens', 'output_tokens')):
+            if type(usage.get(source)) is int and usage[source] >= 0:
+                metrics[target] = usage[source]
+    return text, 'openrouter'

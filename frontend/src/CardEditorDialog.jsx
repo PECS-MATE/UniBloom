@@ -1,0 +1,111 @@
+import { useEffect, useId, useRef, useState } from 'react';
+import UiIcon from './UiIcon';
+import CardOcrAssist from './CardOcrAssist';
+import CardPhotoPicker from './CardPhotoPicker';
+import CardImageTools from './CardImageTools';
+
+export default function CardEditorDialog({ editing, categories, targetName, targetId, ocrDisabled, privateOnly = false,
+  busy, error, onSubmit, onClose }) {
+  const dialog = useRef(null);
+  const errorMessage = useRef(null);
+  const trigger = useRef(document.activeElement);
+  const titleId = useId();
+  const descriptionId = useId();
+  const imageHelpId = useId();
+  const [visibility, setVisibility] = useState(privateOnly ? 'private' : editing?.visibility || 'private');
+  const [image, setImage] = useState(null);
+  const [toolLabel, setToolLabel] = useState(editing?.label || '');
+  const [toolCategory, setToolCategory] = useState(editing?.category || '');
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoError, setPhotoError] = useState('');
+  const [imageMode, setImageMode] = useState('photo');
+  const [generatedPreview, setGeneratedPreview] = useState('');
+
+  useEffect(() => {
+    if (!image || imageMode !== 'ai') { setGeneratedPreview(''); return; }
+    const url = URL.createObjectURL(image);
+    setGeneratedPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [image, imageMode]);
+
+  useEffect(() => {
+    const modal = dialog.current;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    modal.showModal();
+    modal.querySelector('input[name="label"]')?.focus();
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      requestAnimationFrame(() => {
+        if (!modal.isConnected && trigger.current?.isConnected) trigger.current.focus();
+      });
+    };
+  }, []);
+
+  useEffect(() => { if (error) errorMessage.current?.focus(); }, [error]);
+
+  function keepFocusInside(event) {
+    if (event.key !== 'Tab') return;
+    const controls = [...dialog.current.querySelectorAll('button, input, select, textarea, [tabindex]')]
+      .filter(control => !control.disabled && control.tabIndex >= 0 && control.getClientRects().length);
+    const first = controls[0];
+    const last = controls.at(-1);
+    if (!first) { event.preventDefault(); return; }
+    if ((event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    }
+  }
+
+  return <dialog ref={dialog} className="card-editor-dialog" aria-labelledby={titleId}
+    aria-describedby={descriptionId} onKeyDown={keepFocusInside}
+    onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}>
+    <header className="card-editor-heading"><h2 id={titleId}>{editing ? '카드 수정' : privateOnly ? '개인 카드 등록' : '새 카드 등록'}</h2>
+      <p id={descriptionId}>{privateOnly ? `${targetName}님만 사용하는 카드를 등록합니다.` : '카드 정보를 입력하고 사용할 범위를 골라 주세요.'}</p></header>
+    <form className="card-editor-form" onSubmit={event => {
+      if (busy || photoBusy) { event.preventDefault(); return; }
+      if (!editing && !image) { event.preventDefault(); setPhotoError(imageMode === 'ai' ? '그림을 생성한 뒤 확인하고 적용해 주세요.' : '카드를 촬영하거나 사진을 선택해 주세요.'); return; }
+      onSubmit(event, image);
+    }}>
+      <div className="card-editor-body">
+        {error && <p ref={errorMessage} tabIndex="-1" role="alert" className="error">{error}</p>}
+        {photoError && <p role="alert" className="error">{photoError}</p>}
+        <p className="card-editor-required">모든 입력 항목은 필수입니다.{editing && ' 기존 이미지는 유지됩니다.'}</p>
+        <fieldset disabled={busy}>
+          <legend className="visually-hidden">카드 정보</legend>
+          <label>카드명<input name="label" required maxLength="30" placeholder="예: 연필" defaultValue={editing?.label || ''} onChange={e => setToolLabel(e.target.value)} /></label>
+          <label>카테고리<select name="category" required defaultValue={editing?.category || ''} onChange={event => setToolCategory(event.target.value)}>
+            <option value="" disabled>카테고리 선택</option>{categories.map(item => <option key={item.id} value={item.name}>{item.name}</option>)}
+          </select></label>
+          {privateOnly ? <input name="visibility" type="hidden" value="private" /> :
+            <label>공개 범위<select name="visibility" value={visibility} onChange={event => setVisibility(event.target.value)}>
+              <option value="private">나만 사용</option><option value="shared">승인 후 모두에게 공개</option>
+            </select></label>}
+          {!editing && targetId && <div className="card-editor-image-modes" role="group" aria-label="카드 그림 준비 방법">
+            <button type="button" aria-pressed={imageMode === 'photo'} disabled={photoBusy} onClick={() => { setImageMode('photo'); setImage(null); setPhotoError(''); }}>사진 카드</button>
+            <button type="button" aria-pressed={imageMode === 'ai'} disabled={photoBusy || ocrDisabled} onClick={() => { setImageMode('ai'); setImage(null); setPhotoError(''); }}>AI 그림 카드</button>
+          </div>}
+          {!editing && imageMode === 'photo' && <CardPhotoPicker file={image} disabled={busy} onBusyChange={setPhotoBusy}
+            onChange={file => { setImage(file); setPhotoError(''); }} />}
+        </fieldset>
+        {!editing && imageMode === 'photo' && <CardOcrAssist file={image} targetId={targetId} disabled={busy || photoBusy || ocrDisabled} onApply={value => {
+          const input = dialog.current?.querySelector('input[name="label"]');
+          if (input) { input.value = value; input.focus(); }
+          setToolLabel(value);
+        }} />}
+        {!editing && <CardImageTools key={imageMode} label={toolLabel} category={toolCategory} file={image} targetId={targetId} initialOpen={imageMode === 'ai'}
+          disabled={busy || photoBusy || ocrDisabled} onApply={file => { setImage(file); setPhotoError(''); }} />}
+        {!editing && generatedPreview && <figure className="card-editor-generated-preview"><img src={generatedPreview} alt="등록할 AI 그림 카드" /><figcaption>확인한 그림입니다. 카드 저장을 누르면 등록됩니다.</figcaption></figure>}
+        {!editing && imageMode === 'photo' && <p id={imageHelpId} className="form-notice">JPG·PNG·WebP, 5MB 이하, 가로·세로 128~4096px 이미지를 선택해 주세요.</p>}
+        <p className="form-notice">{privateOnly ? '연결 사용자만 사용할 수 있으며 공개 승인 목록에는 표시되지 않습니다.'
+          : visibility === 'shared' ? '공개 요청은 운영 담당자 승인 후 모든 사용자에게 표시됩니다.' : '저장하면 나만 사용할 수 있으며 운영 담당자에게 공유되지 않습니다.'}</p>
+      </div>
+      <footer className="card-editor-actions">
+        <button type="button" disabled={busy} onClick={onClose}>취소</button>
+        {!editing && <button type="submit" value="draft" disabled={busy || photoBusy}>임시 저장</button>}
+        <button type="submit" value="submit" className="primary" disabled={busy || photoBusy}>{busy ? '저장 중…' : editing ? '수정 저장' : visibility === 'shared' ? '공개 승인 요청' : '카드 저장'}</button>
+      </footer>
+    </form>
+    <button type="button" className="card-editor-close" disabled={busy} aria-label="카드 등록창 닫기" onClick={onClose}><UiIcon name="close" /></button>
+  </dialog>;
+}

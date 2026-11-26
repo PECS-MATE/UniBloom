@@ -1,0 +1,79 @@
+/* Compact app layout; keep controls readable and scroll within card rows, not the page. */
+.app .sidebar-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.app .sidebar-heading .sidebar-brand { flex: 1; min-width: 0; }
+.app .sidebar-toggle, .app .sidebar-toggle[aria-expanded="false"], .app.caregiver-ui .sidebar-toggle, .app.high-contrast .sidebar-toggle[aria-expanded="false"] { flex: 0 0 44px; width: 44px; min-height: 44px; padding: 10px; border: 0; border-radius: 0; background: transparent; color: var(--color-text); box-shadow: none; }
+.app .sidebar-toggle:hover:not(:disabled) { background: transparent; transform: none; box-shadow: none; }
+.app.caregiver-ui .sidebar-toggle:not(.primary):not(.active):not([aria-current="page"]):not([aria-selected="true"]) { background-color: transparent; }
+.app.high-contrast .sidebar-toggle { color: var(--color-contrast); }
+.sidebar-backdrop { position: fixed; inset: 0; z-index: 39; background: var(--color-shadow); }
+@media (max-width: 1000px) {
+  .app, .app.caregiver-ui:not(.sidebar-collapsed) { display: block; width: 100%; }
+  .app > .sidebar, .app.caregiver-ui > .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 40; display: flex; flex-direction: column; gap: 16px; width: min(320px, calc(100vw - 32px)); height: 100dvh; padding: 16px; border-right: 1px solid var(--color-border); border-bottom: 0; overflow-y: auto; }
+  .app > .sidebar[hidden] { display: none; }
+  .app .sidebar .sidebar-brand { display: flex; }
+  .app .sidebar-summary, .app .sidebar-tip { display: none; }
+  .app .sidebar nav, .app.caregiver-ui .sidebar nav { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 0; padding: 0; overflow: visible; }
+  .app .sidebar nav button, .app.caregiver-ui .sidebar nav button { width: 100%; min-width: 0; min-height: 44px; padding: 10px 12px; justify-content: flex-start; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+  .app .sidebar nav button[aria-current="page"]::after { left: 12px; right: 12px; top: auto; bottom: 0; width: auto; height: 3px; }
+  .app .sidebar .profile-trigger, .app.caregiver-ui .sidebar .profile-trigger { margin: auto 0 0; padding: 0; gap: 8px; flex-wrap: nowrap; }
+  .app .sidebar .profile-trigger > span:nth-child(2), .app.caregiver-ui .profile-trigger > span:nth-child(2) { min-width: 0; }
+  .app .sidebar .profile-settings-icon { flex: 0 0 44px; width: 44px; height: 44px; }
+  .app .sidebar .logout { position: static; align-self: stretch; width: 100%; min-height: 44px; margin: 0; padding: 8px 12px; }
+  .app .app-content, .app.caregiver-ui .app-content { min-width: 0; padding: 16px clamp(12px, 2.5vw, 24px) 24px; }
+  .app .sidebar-toggle-bar { margin-bottom: 8px; }
+  .app .topbar, .app.caregiver-ui .topbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+  .app .topbar > div:first-child { flex: 1 1 240px; min-width: 0; }
+  .app .topbar .eyebrow { margin: 0 0 4px; }
+  .app .topbar h1 { margin: 0; font-size: clamp(1.25rem, 3vw, 1.7rem); line-height: 1.4; overflow-wrap: anywhere; }
+  .app .topbar-statuses { min-width: 0; max-width: 100%; }
+  .app .topbar .status { margin-top: 0; }
+  .app .connection-menu-panel { max-height: 65dvh; overflow-y: auto; overscroll-behavior: contain; }
+  .app .screen-cards .board { margin-bottom: 14px; padding: 12px; border-radius: 16px; }
+  .app .screen-cards .board > .section-title { gap: 8px; margin-bottom: 8px; }
+  .app .screen-cards .board h2 { margin: 0; font-size: 1rem; }
+  .app .screen-cards .sentence-toolbar { gap: 6px; }
+  .app .screen-cards .sentence-toolbar button { width: 44px; height: 44px; min-height: 44px; padding: 9px; }
+  .app .screen-cards .board > .sentence-strip { gap: 8px; margin-bottom: 0; }
+  .app .screen-cards .board > .sentence-strip:empty { display: none; }
+  .app .screen-cards .board > .sentence-strip > li { width: 120px; min-width: 120px; }
+  .app .screen-cards .sentence-card-move { padding: 16px 8px 8px; }
+  .app .screen-cards .sentence-card-picture { width: 88px; height: 88px; }
+  .app .quick-speech, .app .recovery-speech { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr)); gap: 8px; margin: 12px 0; padding: 12px; }
+  .app .quick-speech > div, .app .recovery-speech > div { grid-column: 1 / -1; min-width: 0; }
+  .app .quick-speech button, .app .recovery-speech button { width: 100%; min-width: 0; min-height: 44px; justify-content: flex-start; white-space: normal; overflow-wrap: anywhere; }
+  .app .screen-cards .workspace { gap: 14px; }
+  .app .screen-cards .workspace > #card-library { min-width: 0; padding: 14px; border-radius: 16px; }
+  .app .screen-cards #card-library .section-title { align-items: stretch; gap: 8px; }
+  .app .screen-cards #card-library .section-title h2 { font-size: 1.1rem; }
+  .app .screen-cards #card-library input { min-width: 0; width: 100%; margin: 0; }
+  .app .screen-cards .cards, .app .catalog-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--compact-card-width, 112px)), 1fr)); gap: 8px; }
+  .app.card-size-small { --compact-card-width: 92px; }
+  .app.card-size-large { --compact-card-width: 160px; }
+  .app .screen-cards .categories { gap: 6px; }
+  .app .screen-cards .categories button { min-height: 44px; }
+}
+
+@media (max-width: 480px) {
+  .app .sidebar .logout { font-size: .875rem; padding-inline: 8px; }
+  .app .sidebar .profile-avatar { flex-basis: 40px; width: 40px; height: 40px; }
+  .app .topbar > div:first-child { flex-basis: 100%; }
+  .app .topbar-statuses { width: 100%; justify-items: start; }
+  .app .connection-menu { width: min(100%, 260px); }
+  .app .connection-menu-panel { left: 0; right: auto; width: min(300px, calc(100vw - 48px)); }
+  .app .screen-cards .board > .section-title { align-items: center; }
+  .app .screen-cards .board h2 small { margin-left: 4px; }
+}
+
+/* Keep caregiver navigation anchors and profile stable as child menus expand. */
+.app.caregiver-ui > .sidebar { overflow: hidden; }
+.app.caregiver-ui .sidebar > nav { flex: 1 1 0; min-height: 0; width: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 48px 48px minmax(0, 1fr); align-content: start; justify-content: stretch; gap: 8px; margin: 24px 0 16px; padding: 0; overflow: hidden; }
+.app.caregiver-ui .sidebar > nav > button { width: 100%; min-width: 0; margin: 0; justify-content: flex-start; }
+.app.caregiver-ui .sidebar nav .caregiver-management-menu { min-height: 0; align-self: stretch; align-content: start; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; scrollbar-gutter: stable; }
+.app.caregiver-ui .sidebar .profile-trigger { flex: 0 0 auto; flex-wrap: nowrap; gap: 8px; margin: 0; padding: 8px 0; }
+.app.caregiver-ui .sidebar .profile-trigger > span:nth-child(2) { min-width: 0; }
+.app.caregiver-ui .sidebar .profile-trigger strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.app.caregiver-ui .sidebar .profile-settings-icon { flex: 0 0 44px; width: 44px; height: 44px; }
+.app.caregiver-ui .sidebar .logout { flex: 0 0 auto; }
+@media (min-width: 1001px) {
+  .app.caregiver-ui:not(.sidebar-collapsed) { grid-template-columns: 256px minmax(0, 1fr); }
+}

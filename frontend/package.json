@@ -1,0 +1,32 @@
+{
+  "name": "pecsmate-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": "^22.13.0 || ^24.0.0 || >=26.0.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:watch": "vite build --watch",
+    "preview": "vite preview",
+    "test": "vitest",
+    "test:card-speech": "node --test src/services/cardSpeech.test.mjs"
+  },
+  "dependencies": {
+    "bootstrap": "^5.3.8",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.10",
+    "@vitejs/plugin-react": "latest",
+    "fake-indexeddb": "^6.2.8",
+    "jsdom": "^26.1.0",
+    "vite": "latest",
+    "vitest": "^5.1.0"
+  }
+}

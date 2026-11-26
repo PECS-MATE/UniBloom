@@ -1,0 +1,55 @@
+{
+  "project_name": "UniBloom",
+  "session_id": "unibloom-initial-20261126",
+  "status": "proposal",
+  "source": "Current local README.md and frontend/package.json",
+  "limitation": "Target repository returned 404 through GitHub connector; target contents unverified.",
+  "assumption": "A successor web application for existing AAC users",
+  "tasks": [
+    {
+      "id": "U1",
+      "agent": "pm",
+      "title": "Define one target user and core improvement",
+      "priority": 1,
+      "dependencies": [],
+      "scope": ["README.md"],
+      "task": "In the confirmed UniBloom working copy, agree and document the target user, one problem, core journey, acceptance criteria and excluded scope before implementation.",
+      "acceptance_criteria": [{"id": "AC1", "description": "README defines target user, problem, journey and excluded scope; user agreement recorded."}],
+      "required_checks": [{"id": "read-spec", "criteria": ["AC1"], "command": ["powershell", "-NoProfile", "-Command", "Get-Content README.md"], "cwd": "."}],
+      "test_approach": "not_applicable",
+      "test_approach_rationale": "Product scope proposal requires human review.",
+      "alternative_verification": "Review README against AC1 and record unresolved decisions.",
+      "retry_policy": "manual"
+    },
+    {
+      "id": "U2",
+      "agent": "architecture",
+      "title": "Inspect destination and define migration baseline",
+      "priority": 2,
+      "dependencies": ["U1"],
+      "scope": ["docs/"],
+      "task": "Inspect the destination repository with read-only operations, record source commit and destination state, and document a history-preserving migration procedure with private data exclusions and startup validation; do not overwrite existing destination work.",
+      "acceptance_criteria": [{"id": "AC2", "description": "Migration document identifies repository states, source commit, exclusions and reproducible validation steps."}],
+      "required_checks": [{"id": "read-baseline", "criteria": ["AC2"], "command": ["powershell", "-NoProfile", "-Command", "Get-Content docs/migration-baseline.md"], "cwd": "."}],
+      "test_approach": "not_applicable",
+      "test_approach_rationale": "Migration planning only; execution checks must be selected from the confirmed baseline.",
+      "alternative_verification": "Review migration document against observed source and target states.",
+      "retry_policy": "manual"
+    },
+    {
+      "id": "U3",
+      "agent": "pm",
+      "title": "Specify the first improvement",
+      "priority": 3,
+      "dependencies": ["U2"],
+      "scope": ["docs/"],
+      "task": "Specify one agreed improvement with before/after journey, affected screens, API contracts or explicit unchanged boundaries, data handling and behavior-based verification criteria; defer execution tasks until repository baseline is verified.",
+      "acceptance_criteria": [{"id": "AC3", "description": "First-improvement spec includes user journey, boundaries, error, offline and accessibility criteria."}],
+      "required_checks": [{"id": "read-improvement", "criteria": ["AC3"], "command": ["powershell", "-NoProfile", "-Command", "Get-Content docs/first-improvement.md"], "cwd": "."}],
+      "test_approach": "not_applicable",
+      "test_approach_rationale": "Specification stage before implementation.",
+      "alternative_verification": "Review all AC3 elements and derive implementation checks from actual repository tooling.",
+      "retry_policy": "manual"
+    }
+  ]
+}

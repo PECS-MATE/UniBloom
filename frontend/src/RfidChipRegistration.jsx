@@ -1,0 +1,137 @@
+import { useEffect, useRef, useState } from 'react';
+import { request, requestBlob } from './services/api';
+import UsbRfidReader from './UsbRfidReader';
+import UiIcon from './UiIcon';
+
+export function CardPreview({ card, artStyle }) {
+  const [url, setUrl] = useState('');
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setUrl(''); setFailed(false);
+    if (!card?.custom) return;
+    let active = true, objectUrl;
+    requestBlob(card.thumbnail_url || card.image_url).then(blob => {
+      objectUrl = URL.createObjectURL(blob);
+      if (active) setUrl(objectUrl); else URL.revokeObjectURL(objectUrl);
+    }).catch(() => { if (active) setFailed(true); });
+    return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [card?.id, card?.thumbnail_url, card?.image_url]);
+  if (!card) return null;
+  const style = url ? { backgroundImage: `url(${url})` } : card.custom ? undefined : artStyle?.(card);
+  return <span role="img" aria-label={`${card.label} 그림`} className="chip-card-preview"
+    style={style}>{!style ? card.custom ? failed ? '그림을 불러오지 못했습니다' : '그림을 불러오는 중' : card.label : ''}</span>;
+}
+
+export default function RfidChipRegistration({ accountId, artStyle }) {
+  const [catalog, setCatalog] = useState({ cards: [], bindings: [] });
+  const [uid, setUid] = useState(''), [cardId, setCardId] = useState('');
+  const [search, setSearch] = useState(''), [filter, setFilter] = useState('');
+  const [choicePage, setChoicePage] = useState(0);
+  const [armed, setArmed] = useState(true), [loading, setLoading] = useState(true), [saving, setSaving] = useState(false);
+  const [error, setError] = useState(''), [notice, setNotice] = useState('');
+  const epoch = useRef(0), capture = useRef(true);
+  const token = localStorage.getItem('pesc-mate-token');
+  const current = run => epoch.current === run && token && localStorage.getItem('pesc-mate-token') === token;
+  const existing = catalog.bindings.find(row => row.uid === uid);
+  const card = catalog.cards.find(row => row.id === cardId);
+
+  async function reload(run = epoch.current) {
+    setLoading(true); setError('');
+    try { const data = await request('/rfid/admin/catalog'); if (current(run)) setCatalog(data); }
+    catch (failure) { if (current(run)) setError(failure.message); }
+    finally { if (current(run)) setLoading(false); }
+  }
+  useEffect(() => {
+    const run = ++epoch.current;
+    capture.current = true; setArmed(true); setUid(''); setCardId(''); setSearch(''); setChoicePage(0); setNotice('');
+    reload(run);
+    return () => { ++epoch.current; capture.current = false; };
+  }, [accountId, token]);
+
+  function selectChip(value) {
+    if (!capture.current) return;
+    capture.current = false; setArmed(false); setUid(value); setCardId(''); setNotice(''); setError('');
+  }
+  function nextChip() {
+    capture.current = true; setArmed(true); setUid(''); setCardId(''); setSearch(''); setChoicePage(0); setNotice(''); setError('');
+  }
+  async function change(targetUid, targetCardId, revision) {
+    const run = epoch.current, wasArmed = capture.current;
+    const selected = catalog.cards.find(row => row.id === targetCardId);
+    setSaving(true); capture.current = false; setError(''); setNotice('');
+    try {
+      const result = await request('/rfid/admin/bindings', { method: 'PUT', body: JSON.stringify({
+        uid: targetUid, card_id: targetCardId, expected_revision: revision,
+      }) });
+      if (!current(run)) return;
+      setCatalog(data => ({ ...data, bindings: result.binding
+        ? [result.binding, ...data.bindings.filter(row => row.uid !== targetUid)]
+        : data.bindings.filter(row => row.uid !== targetUid) }));
+      if (targetUid === uid && !targetCardId) setCardId('');
+      setNotice(targetCardId ? `${targetUid} → ${selected.label} 저장 완료. 칩을 떼고 ‘다음 칩 인식’을 눌러 주세요.` : `${targetUid} 공용 연결을 해제했습니다.`);
+    } catch (failure) {
+      if (current(run)) setError(`${failure.message} 목록을 새로고침해 실제 등록 상태를 확인한 뒤 다시 시도해 주세요.`);
+    } finally { if (current(run)) { setSaving(false); capture.current = wasArmed; } }
+  }
+  const searchTerms = search.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const mappedCardIds = new Set(catalog.bindings.map(row => row.card_id));
+  const choices = catalog.cards.filter(row => !mappedCardIds.has(row.id)
+    && searchTerms.every(term => `${row.label} ${row.category || ''}`.toLocaleLowerCase().includes(term)));
+  const pageSize = 8;
+  const pageCount = Math.max(1, Math.ceil(choices.length / pageSize));
+  const page = Math.min(choicePage, pageCount - 1);
+  const visibleChoices = choices.slice(page * pageSize, (page + 1) * pageSize);
+  const registered = catalog.bindings.filter(row => `${row.uid} ${row.label || '사용 불가'}`.toLowerCase().includes(filter.trim().toLowerCase()));
+
+  return <section className="chip-registration" aria-label="공용 RFID 칩 등록">
+    <h2>공용 RFID 칩 등록</h2>
+    <p>칩을 하나씩 읽고 그림카드에 연결하세요. 등록한 공용 칩은 모든 아동에게 적용됩니다. 개인 사진 카드는 기존 아동별 RFID 설정에서 연결합니다.</p>
+    <ol className="chip-registration-steps" aria-label="칩 등록 순서">
+      <li aria-current={!uid ? 'step' : undefined}><span>1</span>칩 인식</li>
+      <li aria-current={uid && !card ? 'step' : undefined}><span>2</span>그림카드 선택</li>
+      <li aria-current={uid && card ? 'step' : undefined}><span>3</span>확인 후 저장</li>
+    </ol>
+    {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}
+    <div className="chip-registration-grid">
+      <article aria-label="현재 인식한 칩"><h3>1. 칩 인식</h3>
+        <div className="chip-capture-heading"><span aria-hidden="true"><UiIcon name="reader" size={24} /></span><p>{uid ? '읽은 칩을 확인해 주세요' : '등록할 카드를 리더기에 대세요'}</p></div>
+        <UsbRfidReader targetId={accountId} manager canMap registration eventScope="shared" onUid={selectChip} />
+        <p role="status">{armed ? '등록할 칩을 하나만 리더기에 대세요.' : '인식한 칩을 고정했습니다. 저장 또는 확인 후 다음 칩으로 이동하세요.'}</p>
+        <p>UID: <output aria-label="인식한 칩 UID">{uid || '인식 대기'}</output></p>
+        {uid && <p>{existing ? `이미 등록된 칩: ${existing.label || '사용 불가 카드'}` : '아직 등록되지 않은 칩입니다.'}</p>}
+        <button type="button" disabled={saving || loading} onClick={nextChip}>다음 칩 인식</button>
+      </article>
+      <form onSubmit={event => { event.preventDefault(); if (uid && card && !saving && !loading) change(uid, card.id, existing?.revision ?? null); }}>
+        <h3>2. 그림카드 선택 및 저장</h3>
+        <label>공용 카드 검색<input type="search" value={search} disabled={saving} onChange={event => { setSearch(event.target.value); setChoicePage(0); }} placeholder="카드명 또는 분류로 검색" aria-describedby="chip-card-search-help" /></label>
+        <p id="chip-card-search-help">아직 RFID 칩에 연결되지 않은 공용 카드만 표시합니다.{!uid && ' 칩을 먼저 인식하면 선택할 수 있습니다.'}</p>
+        <p role="status">{loading ? '공용 카드를 불러오는 중입니다…' : `검색 결과 ${choices.length}개`}</p>
+        <ul className="chip-card-choices" aria-label="연결할 공용 그림카드">
+          {visibleChoices.map(row => <li key={row.id}><button type="button" aria-pressed={cardId === row.id}
+            disabled={saving || loading || !uid} onClick={() => setCardId(row.id)}>
+            <strong>{row.label}</strong><small>{row.category}</small>{cardId === row.id && <span>선택됨</span>}
+          </button></li>)}
+        </ul>
+        {!loading && !choices.length && <p>검색 결과가 없습니다. 연결되지 않은 카드가 있는지 확인하거나 다른 카드명·분류로 검색해 주세요.</p>}
+        {pageCount > 1 && <nav className="chip-card-pagination" aria-label="공용 카드 검색 결과 페이지">
+          <button type="button" disabled={saving || page === 0} onClick={() => setChoicePage(page - 1)}>이전</button>
+          <span>{page + 1} / {pageCount} 페이지</span>
+          <button type="button" disabled={saving || page === pageCount - 1} onClick={() => setChoicePage(page + 1)}>다음</button>
+        </nav>}
+        <div className="chip-preview-surface">{card ? <><CardPreview card={card} artStyle={artStyle} /><strong>{card.label}</strong><small>{card.category}</small></> : <p>칩을 읽고 연결할 그림카드를 선택하면<br />여기에서 미리 볼 수 있어요.</p>}</div>
+        {uid && card && <p>저장할 연결: <code>{uid}</code> → <strong>{card.label}</strong></p>}
+        <button className="primary" disabled={saving || loading || !uid || !card || existing?.card_id === cardId}>{saving ? '확인·저장 중…' : existing ? '칩 연결 변경' : '칩 등록 저장'}</button>
+      </form>
+    </div>
+    <h3>등록된 공용 칩 {catalog.bindings.length}개</h3>
+    <label>등록 목록 검색<input value={filter} onChange={event => setFilter(event.target.value)} placeholder="UID 또는 카드명" /></label>
+    <button type="button" disabled={saving || loading} onClick={() => reload()}>공용 칩 목록 새로고침</button>
+    {loading ? <p role="status">공용 칩 목록을 불러오는 중입니다…</p> : <ul aria-label="등록된 공용 칩">{registered.slice(0, 50).map(row => <li key={row.uid}>
+      <code>{row.uid}</code> → <strong>{row.label || '사용 불가 카드'}</strong>
+      <button type="button" disabled={saving} onClick={() => { capture.current = false; setArmed(false); setUid(row.uid); setCardId(row.available ? row.card_id : ''); setSearch(''); setChoicePage(0); setNotice(''); }}>연결 수정</button>
+      <button type="button" disabled={saving} onClick={() => change(row.uid, null, row.revision)}>연결 해제</button>
+    </li>)}</ul>}
+    {!loading && !registered.length && <p>검색 조건에 맞는 등록 칩이 없습니다.</p>}
+    {registered.length > 50 && <p>검색 결과 중 최근 50개를 표시합니다. UID나 카드명으로 검색해 주세요.</p>}
+  </section>;
+}

@@ -1,0 +1,317 @@
+name: pesc-mate
+
+services:
+  melotts:
+    build:
+      context: ./services/melotts
+    environment:
+      MELO_THREADS: "2"
+    volumes:
+      - melotts_models:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10m
+      retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  mongodb:
+    image: mongo:8.0
+    attach: false
+    command: ["mongod", "--quiet"]
+    ports:
+      - "127.0.0.1:27018:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 30s
+      timeout: 30s
+      retries: 10
+    logging:
+      driver: "none"
+
+  backend: &app-backend
+    build:
+      context: ./backend
+      args:
+        INSTALL_IMAGE_TOOLS: "${INSTALL_IMAGE_TOOLS:-false}"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app --no-access-log
+    environment: &backend-environment
+      RFID_ALLOW_INSECURE_LAN: "${RFID_ALLOW_INSECURE_LAN:-false}"
+      MONGODB_URI: mongodb://mongodb:27017
+      MELO_TTS_URL: http://melotts:8090
+      SPEECH_TTS_PROVIDER: "${SPEECH_TTS_PROVIDER:-melotts}"
+      SPEECH_TTS_URL: "${SPEECH_TTS_URL:-}"
+      SPEECH_TIMEOUT_SECONDS: "${SPEECH_TIMEOUT_SECONDS:-35}"
+      DASHSCOPE_API_KEY: "${DASHSCOPE_API_KEY:-}"
+      QWEN_API_MODEL: "${QWEN_API_MODEL:-qwen3-tts-flash}"
+      QWEN_API_GIRL_VOICE: "${QWEN_API_GIRL_VOICE:-Cherry}"
+      QWEN_API_BOY_VOICE: "${QWEN_API_BOY_VOICE:-Ethan}"
+      TTS_CACHE_VERSION: "${TTS_CACHE_VERSION:-melotts-kr-v1}"
+      PUBLIC_SPEECH_CACHE_DIR: /var/cache/pecsmate/public-speech
+      MONGODB_DATABASE: pesc_mate
+      DEMO_ACCOUNTS_ENABLED: "true"
+      ACCOUNT_PERMISSION_MANAGER_IDS: "${ACCOUNT_PERMISSION_MANAGER_IDS:-}"
+      DEMO_USERNAME: demo
+      DEMO_PASSWORD: "1234"
+      DEMO_SECOND_USERNAME: demo2
+      DEMO_SECOND_PASSWORD: "1234"
+      CAREGIVER_USERNAME: caregiver
+      CAREGIVER_PASSWORD: "1234"
+      SUPPORT_USERNAME: support
+      SUPPORT_PASSWORD: "1234"
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: "1234"
+      WATCHFILES_FORCE_POLLING: "true"
+      WATCHFILES_POLL_DELAY_MS: "500"
+      OLLAMA_ENABLED: "true"
+      SENTENCE_PROVIDER: "${SENTENCE_PROVIDER:-ollama}"
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      OPENROUTER_MODEL: "${OPENROUTER_MODEL:-qwen/qwen3-30b-a3b-instruct-2507}"
+      OPENROUTER_TIMEOUT_SECONDS: "${OPENROUTER_TIMEOUT_SECONDS:-8}"
+      OPENROUTER_MAX_TOKENS: "${OPENROUTER_MAX_TOKENS:-96}"
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      OLLAMA_MODEL: qwen2.5:0.5b
+      OLLAMA_TIMEOUT_SECONDS: "10"
+      OLLAMA_KEEP_ALIVE: "${OLLAMA_KEEP_ALIVE:-30m}"
+      OLLAMA_WARMUP_ENABLED: "${OLLAMA_WARMUP_ENABLED:-true}"
+      OLLAMA_WARMUP_TIMEOUT_SECONDS: "${OLLAMA_WARMUP_TIMEOUT_SECONDS:-30}"
+      OLLAMA_NUM_CTX: "${OLLAMA_NUM_CTX:-2048}"
+      OLLAMA_NUM_PREDICT: "${OLLAMA_NUM_PREDICT:-60}"
+      OLLAMA_LEARNING_ENABLED: "${OLLAMA_LEARNING_ENABLED:-false}"
+      OLLAMA_LEARNING_MODEL: "${OLLAMA_LEARNING_MODEL:-qwen3:4b-instruct}"
+      IMAGE_SAFETY_API_URL: "${IMAGE_SAFETY_API_URL:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      IMAGE_GENERATION_PROVIDER: "${IMAGE_GENERATION_PROVIDER:-openrouter}"
+      OPENROUTER_IMAGE_MODEL: "${OPENROUTER_IMAGE_MODEL:-google/gemini-2.5-flash-image}"
+      IMAGE_GENERATION_DAILY_LIMIT: "${IMAGE_GENERATION_DAILY_LIMIT:-30}"
+      HF_TOKEN: "${HF_TOKEN:-}"
+      HF_IMAGE_MODEL: "${HF_IMAGE_MODEL:-black-forest-labs/FLUX.1-schnell}"
+      HF_IMAGE_PROVIDER: "${HF_IMAGE_PROVIDER:-fal-ai}"
+      GEMINI_IMAGE_MODEL: "${GEMINI_IMAGE_MODEL:-gemini-2.5-flash-image}"
+      REMBG_MODEL_PATH: "${REMBG_MODEL_PATH:-}"
+      IMAGE_SAFETY_API_TOKEN: "${IMAGE_SAFETY_API_TOKEN:-}"
+      IMAGE_USER_LIMIT_MIB: "${IMAGE_USER_LIMIT_MIB:-200}"
+      IMAGE_TOTAL_LIMIT_MIB: "${IMAGE_TOTAL_LIMIT_MIB:-2048}"
+    ports:
+      - "${RFID_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - public_speech_cache:/var/cache/pecsmate/public-speech
+    depends_on:
+      melotts:
+        condition: service_started
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  frontend: &app-frontend
+    build:
+      context: ./frontend
+    command: sh ./start-dev.sh
+    ports:
+      - "${TABLET_BIND_ADDRESS:-127.0.0.1}:5173:5173"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    environment: &frontend-environment
+      VITE_API_BASE_URL: ""
+      VITE_PROXY_TARGET: http://backend:8000
+      VITE_TTS_PROVIDER: "${SPEECH_TTS_PROVIDER:-melotts}"
+      VITE_SPEECH_TIMEOUT_SECONDS: "${VITE_SPEECH_TIMEOUT_SECONDS:-125}"
+      VITE_USE_POLLING: "true"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Target frontend-qwen explicitly; this selects only its Qwen dependencies.
+  qwen-tts:
+    profiles: [qwen]
+    build: ./services/qwen-voice-design
+    entrypoint: [python, /app/server.py]
+    init: true
+    cpus: 2
+    mem_limit: 8g
+    volumes:
+      - qwen_voice_models:/models
+      - ${QWEN_REFERENCE_DIR:-./.local-voice-design/selected}:/reference:ro
+      - ${QWEN_BOY_REFERENCE_DIR:-./.local-voice-design/selected-boy}:/reference-boy:ro
+    environment:
+      QWEN_BASE_REVISION: "${QWEN_BASE_REVISION:-main}"
+      QWEN_DTYPE: "${QWEN_DTYPE:-bfloat16}"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      start_period: 15m
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: '2'
+
+  backend-qwen:
+    <<: *app-backend
+    profiles: [qwen]
+    image: pesc-mate-backend
+    environment:
+      <<: *backend-environment
+      SPEECH_TTS_URL: http://qwen-tts:8090
+      SPEECH_TTS_PROVIDER: qwen3-tts
+      SPEECH_TIMEOUT_SECONDS: '75'
+      PUBLIC_SPEECH_CACHE_DIR: /var/cache/pecsmate/public-speech
+      TTS_CACHE_VERSION: "${QWEN_CACHE_VERSION:-qwen-synthetic-v1}"
+    volumes:
+      - ./backend/app:/app/app
+      - public_speech_cache:/var/cache/pecsmate/public-speech
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      qwen-tts:
+        condition: service_started
+
+  frontend-qwen:
+    <<: *app-frontend
+    profiles: [qwen]
+    image: pesc-mate-frontend
+    environment:
+      <<: *frontend-environment
+      VITE_PROXY_TARGET: http://backend-qwen:8000
+      VITE_TTS_PROVIDER: qwen3-tts
+      VITE_SPEECH_TIMEOUT_SECONDS: '90'
+    depends_on:
+      backend-qwen:
+        condition: service_healthy
+
+  # One-off sample generator, never started by the default application.
+  voice-design:
+    profiles: [voice-design]
+    build: ./services/qwen-voice-design
+    init: true
+    cpus: 2
+    mem_limit: 10g
+    network_mode: bridge
+    environment:
+      QWEN_MODEL_REVISION: "${QWEN_MODEL_REVISION:-main}"
+    volumes:
+      - qwen_voice_models:/models
+      - ./services/qwen-voice-design/voice-description.txt:/app/voice-description.txt:ro
+      - ./services/qwen-voice-design/voice-description-boy.txt:/app/voice-description-boy.txt:ro
+      - ./.local-voice-design:/output
+    restart: "no"
+
+  mongodb-secure:
+    image: mongo:8.0
+    command:
+    - mongod
+    - --auth
+    - --quiet
+    environment:
+      MONGO_INITDB_ROOT_USERNAME_FILE: /run/secrets/mongodb_root_username
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongodb_root_password
+      MONGO_INITDB_DATABASE: ${SECURE_MONGODB_DATABASE:-pesc_mate_secure}
+      MONGODB_USERNAME_FILE: /run/secrets/mongodb_app_username
+      MONGODB_PASSWORD_FILE: /run/secrets/mongodb_app_password
+    secrets:
+    - mongodb_root_username
+    - mongodb_root_password
+    - mongodb_app_username
+    - mongodb_app_password
+    volumes:
+    - mongodb_secure_data:/data/db
+    - ./deployment/mongodb/config.cjs:/opt/pesc-mate/mongodb/config.cjs:ro
+    - ./deployment/mongodb/init-app.js:/docker-entrypoint-initdb.d/10-app.js:ro
+    - ./deployment/mongodb/healthcheck.js:/opt/pesc-mate/mongodb/healthcheck.js:ro
+    healthcheck:
+      test:
+      - CMD
+      - mongosh
+      - --quiet
+      - --file
+      - /opt/pesc-mate/mongodb/healthcheck.js
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    logging:
+      driver: none
+    networks:
+    - secure-database
+    profiles:
+    - secure
+  backend-secure:
+    image: ${SECURE_BACKEND_IMAGE:-pesc-mate-secure-backend:local}
+    build: ./backend
+    environment:
+      MONGODB_REQUIRE_AUTH: 'true'
+      MONGODB_HOST: mongodb-secure
+      MONGODB_PORT: '27017'
+      MONGODB_DATABASE: ${SECURE_MONGODB_DATABASE:-pesc_mate_secure}
+      MONGODB_USERNAME_FILE: /run/secrets/mongodb_app_username
+      MONGODB_PASSWORD_FILE: /run/secrets/mongodb_app_password
+      DEMO_ACCOUNTS_ENABLED: 'false'
+      OLLAMA_ENABLED: 'false'
+    secrets:
+    - mongodb_app_username
+    - mongodb_app_password
+    ports:
+    - 127.0.0.1:${SECURE_BACKEND_PORT:-8001}:8000
+    depends_on:
+      mongodb-secure:
+        condition: service_healthy
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    networks:
+    - secure-database
+    - secure-api
+    profiles:
+    - secure
+
+volumes:
+  melotts_models:
+  mongodb_data:
+  frontend_node_modules:
+  public_speech_cache:
+  qwen_voice_models:
+    name: pecsmate-voice-design_qwen_voice_models
+  mongodb_secure_data:
+    name: pesc-mate-secure_mongodb_secure_data
+
+networks:
+  secure-database:
+    internal: true
+  secure-api: {}
+
+secrets:
+  mongodb_root_username:
+    file: "${PESC_SECURE_SECRETS_DIR:-./.local-secrets}/mongodb_root_username"
+  mongodb_root_password:
+    file: "${PESC_SECURE_SECRETS_DIR:-./.local-secrets}/mongodb_root_password"
+  mongodb_app_username:
+    file: "${PESC_SECURE_SECRETS_DIR:-./.local-secrets}/mongodb_app_username"
+  mongodb_app_password:
+    file: "${PESC_SECURE_SECRETS_DIR:-./.local-secrets}/mongodb_app_password"

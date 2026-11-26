@@ -1,0 +1,105 @@
+import { useId, useRef, useState } from 'react';
+import { a4Geometry, a4BackSlots, MAX_A4_PAGES } from './services/a4Layout';
+import UiIcon from './UiIcon';
+import IconButton from './IconButton';
+import CardOcrAssist from './CardOcrAssist';
+
+export function A4Pages({ rows, layout, selected, onSelect, onDrop, locked = false, duplex = false }) {
+  const geometry = a4Geometry(layout.settings);
+  const byId = new Map(rows.map(row => [row.id, row]));
+  const { settings, slots } = layout;
+  const faces = duplex && !onSelect ? 2 : 1;
+  const backs = faces === 2 ? a4BackSlots(layout) : slots;
+  return Array.from({ length: slots.length / geometry.capacity * faces }, (_, face) => {
+    const page = Math.floor(face / faces), back = faces === 2 && face % 2 === 1;
+    return <div className="a4-sheet-group" key={face}>
+    {onSelect && <p className="a4-page-number">{page + 1}쪽</p>}
+    <div className="card-print-page" aria-label={`A4 ${page + 1}쪽${faces === 2 ? back ? ' 뒷면' : ' 앞면' : ''}`} style={{ width: `${geometry.width}mm`, height: `${geometry.height}mm`, padding: `${settings.margin}mm`,
+      gap: `${settings.gap}mm`, justifyContent: back ? 'end' : 'start', gridTemplateColumns: `repeat(${settings.columns}, ${geometry.cellWidth}mm)`, gridTemplateRows: `repeat(${settings.rows}, ${geometry.cellHeight}mm)` }}>
+      {(back ? backs : slots).slice(page * geometry.capacity, (page + 1) * geometry.capacity).map((slot, localIndex) => {
+        const index = page * geometry.capacity + localIndex, row = slot && byId.get(slot.rowId);
+        const content = row ? back ? <strong style={{ fontSize: `${slot.fontSize}pt` }}>{slot.label || row.label}</strong> : <><span className="a4-image-window"><img src={row.preview} alt={slot.label || row.label} draggable="false"
+          style={{ objectFit: slot.fit, transform: `scale(${slot.zoom})` }} /></span>{settings.labels && slot.label && <strong style={{ fontSize: `${slot.fontSize}pt` }}>{slot.label}</strong>}</> : onSelect ? <span className="a4-empty-slot">＋</span> : null;
+        return onSelect ? <button type="button" key={index} disabled={locked} draggable={!!row && !locked}
+          className={`card-print-cell a4-editable-cell${selected === index ? ' selected' : ''}${row ? '' : ' empty'}`}
+          aria-label={`${page + 1}쪽 ${localIndex + 1}번 칸${row ? `, ${slot.label || row.label || '카드 이미지'}` : ', 빈칸'}`} aria-pressed={selected === index}
+          onClick={() => onSelect(index)} onDragStart={event => event.dataTransfer.setData('application/x-pecs-slot', String(index))}
+          onDragOver={event => { if (!locked) event.preventDefault(); }} onDrop={event => { event.preventDefault(); if (!locked) onDrop(index, event.dataTransfer); }}>{content}</button>
+          : <div key={index} className={`card-print-cell${row ? '' : ' a4-print-empty'}`}>{content}</div>;
+      })}
+    </div>
+  </div>;
+  });
+}
+
+export default function A4Workspace({ rows, layout, onChange, locked, onNotice, targetId, ocrDisabled }) {
+  const [selected, setSelected] = useState(0);
+  const [zoom, setZoom] = useState(60);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const helpId = useId(), helpButton = useRef(null);
+  const { settings, slots } = layout;
+  const geometry = a4Geometry(settings);
+  const selection = Math.min(selected, slots.length - 1), slot = slots[selection];
+  const activeRow = slot && rows.find(row => row.id === slot.rowId);
+  const pages = slots.length / geometry.capacity;
+  function put(row, index = selection) {
+    const next = [...slots];
+    next[index] = { rowId: row.id, label: row.label, zoom: 1, fontSize: 12, fit: 'contain' };
+    onChange({ ...layout, slots: next }); setSelected(index);
+  }
+  function updateSlot(fields) {
+    const next = [...slots]; next[selection] = { ...slot, ...fields }; onChange({ ...layout, slots: next });
+  }
+  function drop(index, transfer) {
+    const source = transfer.getData('application/x-pecs-slot');
+    if (/^\d+$/.test(source) && Number(source) < slots.length) {
+      const next = [...slots]; [next[index], next[Number(source)]] = [next[Number(source)], next[index]];
+      onChange({ ...layout, slots: next }); setSelected(index); return;
+    }
+    const row = rows.find(item => item.id === transfer.getData('application/x-pecs-card'));
+    if (row) put(row, index);
+  }
+  function fill() {
+    const next = [...slots]; let cursor = 0;
+    for (let index = 0; index < next.length && cursor < rows.length; index++) if (!next[index]) {
+      const row = rows[cursor++]; next[index] = { rowId: row.id, label: row.label, zoom: 1, fontSize: 12, fit: 'contain' };
+    }
+    onChange({ ...layout, slots: next });
+    if (cursor < rows.length) onNotice('빈칸까지만 채웠어요. 쪽을 추가하거나 나머지 카드를 직접 배치해 주세요.');
+  }
+  return <>
+    <div className="a4-workspace">
+      <section className="a4-library" aria-label="배치할 카드" onKeyDown={event => {
+        if (event.key === 'Escape' && helpOpen) { event.preventDefault(); setHelpOpen(false); helpButton.current?.focus(); }
+      }}><div className="a4-library-heading"><h4>카드 보관함</h4>
+        <button ref={helpButton} type="button" className="a4-library-help" aria-label="카드 보관함 사용 방법" title="카드 보관함 사용 방법" aria-expanded={helpOpen} aria-controls={helpId} aria-describedby={helpOpen ? helpId : undefined} onClick={() => setHelpOpen(value => !value)}><UiIcon name="info" /></button>
+        <button type="button" className="a4-library-fill" disabled={locked || !rows.length} onClick={fill}>빈칸 자동 채우기</button></div>
+        <p id={helpId} className="a4-library-hint" hidden={!helpOpen}>칸을 고른 뒤 카드를 누르거나 끌어 놓으세요.</p>
+        <div className="a4-library-grid" role="region" aria-label="카드 보관함 가로 목록" tabIndex="0">{rows.map((row, index) => <button type="button" key={row.id} disabled={locked} draggable={!locked}
+          aria-label={`${row.label || `사진 ${index + 1}`} 배치`}
+          onDragStart={event => event.dataTransfer.setData('application/x-pecs-card', row.id)} onClick={() => put(row)}><img src={row.preview} alt="" /></button>)}</div>
+        {!rows.length && <p>사진이나 등록 카드를 추가해 주세요.</p>}
+      </section>
+      <section className="a4-canvas" aria-label="A4 편집 영역"><div className="a4-canvas-tools">
+        <label>미리보기 배율<select value={zoom} onChange={event => setZoom(Number(event.target.value))}>{[30, 40, 50, 60, 80, 100].map(value => <option key={value} value={value}>{value}%</option>)}</select></label>
+        <IconButton icon="plus" label="쪽 추가" disabled={locked || pages >= MAX_A4_PAGES} onClick={() => onChange({ ...layout, slots: [...slots, ...Array(geometry.capacity).fill(null)] })} />
+        <IconButton icon="trash" label="마지막 쪽 삭제" disabled={locked || pages <= 1} onClick={() => {
+          if (slots.slice(-geometry.capacity).some(Boolean) && !window.confirm('마지막 쪽에 배치한 카드를 지울까요? 보관함 원본은 유지됩니다.')) return;
+          onChange({ ...layout, slots: slots.slice(0, -geometry.capacity) });
+        }} /></div>
+        <div className="a4-sheet-scroll"><div style={{ zoom: zoom / 100 }}><A4Pages rows={rows} layout={layout} selected={selection} onSelect={setSelected} onDrop={drop} locked={locked} /></div></div>
+      </section>
+      <fieldset className="a4-properties" disabled={locked}><legend>선택한 칸 · {selection + 1}</legend>
+        {activeRow ? <><label>인쇄 이름<input maxLength="30" placeholder="카드 이름 입력" value={slot.label} onChange={event => updateSlot({ label: event.target.value })} /></label>
+          <CardOcrAssist key={`${targetId}:${selection}:${activeRow.id}`} file={activeRow.file} targetId={targetId}
+            disabled={locked || ocrDisabled} onApply={label => updateSlot({ label })} />
+          <label>글자 크기<select value={slot.fontSize} onChange={event => updateSlot({ fontSize: Number(event.target.value) })}>{[8, 10, 12, 14, 16, 20, 24].map(size => <option key={size} value={size}>{size}pt</option>)}</select></label>
+          <label>그림 맞춤<select value={slot.fit} onChange={event => updateSlot({ fit: event.target.value })}><option value="contain">전체 보이기</option><option value="cover">꽉 채우기 · 일부 잘림</option></select></label>
+          <label>그림 확대<input type="range" min="1" max="2" step=".1" value={slot.zoom} onChange={event => updateSlot({ zoom: Number(event.target.value) })} /></label>
+          <IconButton icon="erase" label="칸 비우기" onClick={() => { const next = [...slots]; next[selection] = null; onChange({ ...layout, slots: next }); }} />
+          <small>인쇄 이름·그림 조정은 이 칸에만 적용됩니다.</small>
+        </> : <p>위에서 카드를 선택해 넣으세요.</p>}
+      </fieldset>
+    </div>
+  </>;
+}

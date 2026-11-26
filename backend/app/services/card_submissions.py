@@ -1,0 +1,530 @@
+"""User card submissions waiting for administrator review."""
+from app.services.write_lock import image_write_lock
+from datetime import datetime, timezone
+from hashlib import sha256
+from io import BytesIO
+from uuid import uuid4
+import re
+import unicodedata
+import warnings
+
+from fastapi import HTTPException
+from PIL import Image, ImageOps, UnidentifiedImageError
+from pymongo.errors import DuplicateKeyError, OperationFailure, PyMongoError
+
+from app.services.card_metadata import with_inferred_metadata
+from app.services.database import database
+from app.services.schema_versions import SCHEMA_VERSION
+from app.services.categories import active_category_names
+from app.services.image_safety import check_image_safety
+from app.services.language_review import review_language
+from app.services import image_storage as storage
+from app.services.image_edits import DEFAULT_EDITS, EDIT_VERSION, apply_edits, validate_edits
+
+ALLOWED_IMAGE_TYPES = {'image/jpeg', 'image/png', 'image/webp'}
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MIN_IMAGE_EDGE = 128
+MAX_IMAGE_EDGE = 4096
+MAX_IMAGE_PIXELS = 16_000_000
+# Leave room below MongoDB's 16 MiB document limit for account/card metadata.
+MAX_STORED_IMAGE_BYTES = 15 * 1024 * 1024
+IMAGE_METADATA = {'original_image': 0, 'image.data': 0, 'thumbnail.data': 0}
+IMAGE_FORMAT_TYPES = {'JPEG': 'image/jpeg', 'PNG': 'image/png', 'WEBP': 'image/webp'}
+PROHIBITED_EXPRESSIONS = {'시발', '씨발', '병신', '개새끼'}
+LABEL_PATTERN = re.compile(r'^[가-힣ㄱ-ㅎㅏ-ㅣA-Za-z0-9 ]+$')
+MEANING_PATTERN = re.compile(r'''^[가-힣ㄱ-ㅎㅏ-ㅣA-Za-z0-9\s.,!?\-'"()·]+$''')
+
+
+def _collection():
+    return database().card_submissions
+
+
+def _audit_collection():
+    return database().card_audit_logs
+
+
+def _public(document):
+    private = document['visibility'] == 'private'
+    effective_status = 'approved' if private and document['status'] == 'pending' else document['status']
+    return {
+        'id': str(document['_id']),
+        'label': document['label'],
+        'meaning': document['meaning'],
+        'category': document['category'],
+        'visibility': document['visibility'],
+        'owner_id': document['owner_id'],
+        'image_revision': document.get('image_revision', 0),
+        'status': effective_status,
+        'requires_review': not private and not document.get('published_directly', False),
+        'sharing_notice': ('나만 볼 수 있으며 운영 담당자 승인 없이 사용할 수 있습니다.' if private
+                           else '승인되면 모든 사용자에게 공개됩니다.'),
+        'image_filename': document['image']['filename'],
+        'image_content_type': document['image']['content_type'],
+        'image_url': f"/api/cards/submissions/{document['_id']}/image",
+        'thumbnail_url': f"/api/cards/submissions/{document['_id']}/image?variant=thumbnail&v={document.get('thumbnail', {}).get('version', 'legacy')}",
+        'review_reason': document.get('review_reason'),
+        'reviewer_id': document.get('reviewer_id'),
+        'reviewed_at': document.get('reviewed_at'),
+        'language_flags': document.get('language_flags', []),
+        'image_safety': document.get('image_safety', {
+            'status': 'manual_review', 'provider': 'administrator',
+            'reasons': ['기존 이미지는 운영 담당자 수동 검토가 필요합니다.'],
+        }),
+        'created_at': document['created_at'],
+    }
+
+
+def _compact_text(value):
+    normalized = unicodedata.normalize('NFKC', value).casefold()
+    return ''.join(character for character in normalized if character.isalnum())
+
+
+def _validate_text(label, meaning, visibility):
+    if not 1 <= len(label) <= 30 or not 1 <= len(meaning) <= 120:
+        raise HTTPException(422, '카드명은 1~30자, 뜻은 1~120자로 입력해 주세요.')
+    if not LABEL_PATTERN.fullmatch(label) or not MEANING_PATTERN.fullmatch(meaning):
+        raise HTTPException(422, '카드명 또는 뜻에 허용되지 않는 문자가 있습니다.')
+    if visibility == 'shared':
+        compact = _compact_text(f'{label} {meaning}')
+        if any(word in compact for word in PROHIBITED_EXPRESSIONS):
+            raise HTTPException(422, '공개 카드에는 다른 사용자에게 부적절한 표현을 사용할 수 없습니다.')
+
+
+def _ensure_unique_label(collection, normalized_label, owner_id, visibility, exclude_id=None):
+    from app.services.communication import CARDS
+    if normalized_label in {_compact_text(card['label']) for card in CARDS}:
+        raise HTTPException(409, '이미 등록된 카드명입니다.')
+    scope = {'owner_id': owner_id} if visibility == 'private' else {'visibility': 'shared'}
+    query = {**scope, 'normalized_label': normalized_label, 'status': {'$ne': 'rejected'}}
+    if exclude_id is not None:
+        query['_id'] = {'$ne': exclude_id}
+    duplicate = collection.find_one(query, {'_id': 1})
+    if not duplicate:
+        # Old rows without normalized_label are scanned only within this owner/public scope.
+        legacy = {**scope, 'normalized_label': {'$exists': False}, 'status': {'$ne': 'rejected'}}
+        if exclude_id is not None:
+            legacy['_id'] = {'$ne': exclude_id}
+        duplicate = next((row for row in collection.find(legacy, {'label': 1})
+                          if _compact_text(row['label']) == normalized_label), None)
+    if duplicate:
+        raise HTTPException(409, '이미 등록되었거나 승인 대기 중인 카드명입니다.')
+
+
+def _ensure_indexes(collection):
+    """Replace the legacy global unique label index with privacy-aware lookups."""
+    if hasattr(collection, 'index_information'):
+        indexes = collection.index_information()
+        legacy = indexes.get('normalized_label_1')
+        if legacy and legacy.get('unique'):
+            try:
+                collection.drop_index('normalized_label_1')
+            except OperationFailure:
+                pass
+    collection.create_index([('owner_id', 1), ('normalized_label', 1)], name='owner_label_lookup')
+    collection.create_index([('visibility', 1), ('normalized_label', 1)], name='shared_label_lookup')
+
+
+def _normalize_image(image_data, declared_content_type, max_edge=storage.DISPLAY_EDGE, *,
+                     min_input_edge=MIN_IMAGE_EDGE, image_edits=None):
+    # Only maintenance of stored derivatives overrides the minimum input edge;
+    # public uploads always keep the default 128px requirement.
+    edits = validate_edits(image_edits)
+    if declared_content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(422, 'JPG, PNG, WebP 이미지만 등록할 수 있습니다.')
+    if not image_data or len(image_data) > MAX_IMAGE_BYTES:
+        raise HTTPException(422, '이미지는 5MB 이하로 등록해 주세요.')
+    # Neither filename nor a short header alone proves a valid image: require
+    # signature, declared MIME, decoder format, verify and full first-frame load.
+    signature_type = (
+        'image/png' if image_data.startswith(b'\x89PNG\r\n\x1a\n') else
+        'image/jpeg' if image_data.startswith(b'\xff\xd8\xff') else
+        'image/webp' if image_data[:4] == b'RIFF' and image_data[8:12] == b'WEBP' else None
+    )
+    if signature_type != declared_content_type:
+        raise HTTPException(422, '파일 형식과 이미지 내용이 일치하지 않습니다.')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', Image.DecompressionBombWarning)
+            with Image.open(BytesIO(image_data)) as probe:
+                actual_content_type = IMAGE_FORMAT_TYPES.get(probe.format)
+                width, height = probe.size
+                probe.verify()
+            if actual_content_type != signature_type:
+                raise HTTPException(422, '파일 형식과 이미지 내용이 일치하지 않습니다.')
+            if (min(width, height) < min_input_edge or max(width, height) > MAX_IMAGE_EDGE
+                    or width * height > MAX_IMAGE_PIXELS):
+                raise HTTPException(422, f'이미지 해상도는 가로·세로 {min_input_edge}~4096px 범위여야 합니다.')
+            with Image.open(BytesIO(image_data)) as source:
+                source.seek(0)
+                normalized = ImageOps.exif_transpose(source)
+                normalized.load()
+                # Palette/RGB PNG can encode transparency with tRNS, not an A band.
+                alpha = 'A' in normalized.getbands() or 'transparency' in normalized.info
+                normalized = normalized.convert('RGBA' if alpha else 'RGB')
+                normalized = apply_edits(normalized, edits, max_edge)
+                normalized.getexif().clear()
+                normalized.info.clear()
+                output = BytesIO()
+                normalized.save(output, format='WEBP', quality=88, method=4,
+                                exif=b'', icc_profile=b'', xmp=b'')
+                return output.getvalue(), 'image/webp'
+    except HTTPException:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError,
+            Image.DecompressionBombWarning) as exc:
+        raise HTTPException(422, '손상되었거나 안전하게 처리할 수 없는 이미지입니다.') from exc
+
+
+def _preserve_original(image_data, content_type, display_data):
+    """Archive validated upload bytes, never use them as a display or safety payload."""
+    if len(image_data) + len(display_data) > MAX_STORED_IMAGE_BYTES:
+        raise HTTPException(422, '원본과 화면용 이미지의 저장 크기가 큽니다. 해상도를 줄여 다시 등록해 주세요.')
+    return {'data': image_data, 'content_type': content_type,
+            'size_bytes': len(image_data), 'sha256': sha256(image_data).hexdigest()}
+
+
+def _image_payload(image_data, image_content_type, image_edits=None):
+    edits = validate_edits(image_edits)
+    content, mime = _normalize_image(image_data, image_content_type)
+    safety = check_image_safety(content, mime)
+    if safety['status'] == 'blocked':
+        raise HTTPException(422, '안전성 검사를 통과하지 못한 이미지는 등록할 수 없습니다.')
+    if edits != DEFAULT_EDITS:
+        content, mime = _normalize_image(image_data, image_content_type, image_edits=edits)
+        edited_safety = check_image_safety(content, mime)
+        if edited_safety['status'] == 'blocked':
+            raise HTTPException(422, '보정한 사진이 안전성 검사를 통과하지 못했습니다.')
+        if safety['status'] == 'passed':
+            safety = edited_safety
+    payload = {
+        'image': {'filename': 'card-image.webp', 'content_type': mime, 'data': content},
+        'original_image': _preserve_original(image_data, image_content_type, content),
+        'thumbnail': storage.thumbnail(content), 'image_safety': safety,
+    }
+    if edits != DEFAULT_EDITS:
+        payload['image_edits'] = {'version': EDIT_VERSION, **edits}
+    return payload
+
+
+def _card_meaning(label, meaning, previous=None):
+    """Keep legacy descriptions, but never require a separate card definition."""
+    explicit = (meaning or '').strip()
+    if explicit:
+        return explicit
+    previous = previous or {}
+    old = (previous.get('meaning') or '').strip()
+    return old if old and old != previous.get('label') else label
+
+
+def create_submission(owner_id, label, meaning, category, visibility,
+                      image_filename, image_content_type, image_data,
+                      submission_mode='submit', actor_id=None, image_edits=None, *, content_operator=None):
+    if content_operator is not None:
+        from app.services.authentication import require_account_permission
+        require_account_permission(content_operator, 'content_manage')
+        if owner_id != content_operator['id'] or visibility != 'shared' or submission_mode != 'submit':
+            raise HTTPException(403, '운영자 공용 카드 등록 범위를 확인해 주세요.')
+        actor_id = content_operator['id']
+    started = datetime.now(timezone.utc)
+    actor_id = actor_id or owner_id
+    label = label.strip()
+    meaning = _card_meaning(label, meaning)
+    category = category.strip()
+    if not label or not meaning or not category:
+        raise HTTPException(422, '카드명과 카테고리를 입력해 주세요.')
+    if category not in active_category_names():
+        raise HTTPException(422, '사용할 수 없는 카드 카테고리입니다.')
+    if visibility not in {'private', 'shared'}:
+        raise HTTPException(422, '공개 범위가 올바르지 않습니다.')
+    _validate_text(label, meaning, visibility)
+    if submission_mode not in {'draft', 'submit'}:
+        raise HTTPException(422, '저장 방식이 올바르지 않습니다.')
+    # Check the full frame and the optional edited frame for both create and replace.
+    payload = _image_payload(image_data, image_content_type, image_edits)
+
+    normalized_label = _compact_text(label)
+    document = {
+        'schema_version': SCHEMA_VERSION,
+        '_id': str(uuid4()),
+        'label': label,
+        'normalized_label': normalized_label,
+        'meaning': meaning,
+        'language_flags': review_language(label, meaning),
+        **payload,
+        'image_revision': 0,
+        'category': category,
+        'visibility': visibility,
+        'owner_id': owner_id,
+        'status': ('draft' if submission_mode == 'draft'
+                   else 'approved' if visibility == 'private' or content_operator is not None else 'pending'),
+        'created_at': datetime.now(timezone.utc),
+    }
+    if content_operator is not None:
+        document.update(published_directly=True, reviewer_id=actor_id, reviewed_at=document['created_at'])
+    try:
+        collection = _collection()
+        _ensure_indexes(collection)
+        with image_write_lock(collection.database):
+            storage.check_deletion_race(collection.database, owner_id, started,
+                                        require_consent=content_operator is None)
+            _ensure_unique_label(collection, normalized_label, owner_id, visibility)
+            storage.check_capacity(collection.database, owner_id, storage.byte_count(document))
+            collection.insert_one(document)
+            _audit_collection().insert_one({
+                'schema_version': SCHEMA_VERSION,
+                '_id': str(uuid4()), 'card_submission_id': document['_id'],
+                'actor_id': actor_id,
+                'action': ('shared_published' if content_operator is not None else
+                           'private_activated' if document['status'] == 'approved' else document['status']),
+                'reason': None, 'created_at': document['created_at'],
+            })
+        return _public(document)
+    except DuplicateKeyError as exc:
+        raise HTTPException(409, '이미 등록되었거나 승인 대기 중인 카드명입니다.') from exc
+    except HTTPException:
+        raise
+    except PyMongoError as exc:
+        raise HTTPException(503, '카드 등록 요청을 저장하지 못했습니다.') from exc
+
+
+def replace_submission_image(submission_id, owner_id, requester, image_content_type, image_data,
+                             expected_revision, image_edits=None):
+    from app.services.support_links import SUPPORT_ROLES, require_link_permission
+    if requester.get('role') not in SUPPORT_ROLES:
+        raise HTTPException(403, '보호자 또는 담당자만 개인 카드 사진을 교체할 수 있습니다.')
+    require_link_permission(requester, owner_id, 'cards_manage')
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise HTTPException(422, '사진 버전을 확인해 주세요.')
+    started = datetime.now(timezone.utc)
+
+    def check(document, db):
+        if not document:
+            raise HTTPException(404, '교체할 개인 카드를 찾을 수 없습니다.')
+        if document['visibility'] != 'private':
+            raise HTTPException(403, '공유 카드 사진은 이 경로에서 교체할 수 없습니다.')
+        if document.get('image_revision', 0) != expected_revision:
+            raise HTTPException(409, '다른 기기에서 사진을 변경했습니다. 최신 등록 목록을 확인해 주세요.')
+        layout = db.board_layouts.find_one({'_id': owner_id}, {'locked_card_ids': 1}) or {}
+        if f'custom:{submission_id}' in layout.get('locked_card_ids', []):
+            raise HTTPException(409, '잠긴 핵심 카드 사진은 교체할 수 없습니다. 카드판 관리에서 잠금을 확인해 주세요.')
+
+    try:
+        collection = _collection(); db = collection.database
+        check(collection.find_one({'_id': submission_id, 'owner_id': owner_id}, IMAGE_METADATA), db)
+        payload = _image_payload(image_data, image_content_type, image_edits)
+        with image_write_lock(db):
+            storage.check_deletion_race(db, owner_id, started, require_consent=True)
+            require_link_permission(requester, owner_id, 'cards_manage')
+            previous = collection.find_one({'_id': submission_id, 'owner_id': owner_id})
+            check(previous, db)
+            storage.check_capacity(db, owner_id, storage.byte_count(payload), storage.byte_count(previous))
+            changes = {**payload, 'image_revision': expected_revision + 1,
+                       'image_updated_at': datetime.now(timezone.utc), 'image_updated_by': requester['id']}
+            query = {'_id': submission_id, 'owner_id': owner_id, 'visibility': 'private'}
+            if expected_revision:
+                query['image_revision'] = expected_revision
+            else:
+                query['$or'] = [{'image_revision': 0}, {'image_revision': {'$exists': False}}]
+            update = {'$set': changes}
+            if 'image_edits' not in payload:
+                update['$unset'] = {'image_edits': ''}
+            if collection.update_one(query, update).matched_count != 1:
+                raise HTTPException(409, '사진 저장 상태가 바뀌었습니다. 최신 등록 목록을 확인해 주세요.')
+            _audit_collection().insert_one({
+                'schema_version': SCHEMA_VERSION, '_id': str(uuid4()), 'card_submission_id': submission_id,
+                'actor_id': requester['id'], 'action': 'image_replaced', 'reason': None,
+                'before_revision': expected_revision, 'after_revision': expected_revision + 1,
+                'created_at': changes['image_updated_at'],
+            })
+        return _public(previous | changes)
+    except PyMongoError as exc:
+        raise HTTPException(503, '사진 교체 결과를 확인하지 못했습니다. 최신 등록 목록을 확인해 주세요.') from exc
+
+
+def submissions_for(owner_id):
+    try:
+        rows = _collection().find({'owner_id': owner_id}, IMAGE_METADATA).sort('created_at', -1)
+        return [_public(row) for row in rows]
+    except PyMongoError as exc:
+        raise HTTPException(503, '카드 등록 내역을 불러오지 못했습니다.') from exc
+
+
+def submissions_for_review():
+    try:
+        rows = _collection().find({}, IMAGE_METADATA).sort('created_at', -1)
+        return [_public(row) for row in rows
+                if row['visibility'] == 'shared' and row['status'] != 'draft']
+    except PyMongoError as exc:
+        raise HTTPException(503, '카드 승인 목록을 불러오지 못했습니다.') from exc
+
+
+def _edit_condition(document):
+    # Also detect two edits that both leave status='draft', including legacy rows.
+    return {'edit_revision': document['edit_revision'] if 'edit_revision' in document else {'$exists': False}}
+
+
+def _require_updated(result):
+    if result.matched_count != 1:
+        raise HTTPException(409, '다른 요청에서 카드가 변경되었습니다. 목록을 갱신한 뒤 다시 시도해 주세요.')
+
+
+def review_submission(submission_id, reviewer_id, decision, reason=''):
+    if decision not in {'approved', 'rejected', 'inactive'}:
+        raise HTTPException(422, '승인, 반려 또는 비활성만 선택할 수 있습니다.')
+    reason = reason.strip()
+    if decision == 'rejected' and not reason:
+        raise HTTPException(422, '반려 사유를 입력해 주세요.')
+    try:
+        collection = _collection()
+        document = collection.find_one({'_id': submission_id}, IMAGE_METADATA)
+        if not document:
+            raise HTTPException(404, '카드 등록 요청을 찾을 수 없습니다.')
+        if document['visibility'] != 'shared':
+            raise HTTPException(403, '개인 카드는 운영 담당자 승인 대상이 아닙니다.')
+        allowed = {
+            'pending': {'approved', 'rejected'},
+            'approved': {'inactive'},
+            'inactive': {'approved'},
+        }
+        if decision not in allowed.get(document['status'], set()):
+            raise HTTPException(409, '현재 상태에서 요청한 상태로 변경할 수 없습니다.')
+        reviewed_at = datetime.now(timezone.utc)
+        changes = {'status': decision, 'review_reason': reason or None,
+                   'reviewer_id': reviewer_id, 'reviewed_at': reviewed_at}
+        result = collection.update_one({'_id': submission_id, 'status': document['status'], **_edit_condition(document)},
+                                       {'$set': changes, '$inc': {'edit_revision': 1}})
+        _require_updated(result)
+        _audit_collection().insert_one({
+            'schema_version': SCHEMA_VERSION,
+            '_id': str(uuid4()), 'card_submission_id': submission_id,
+            'actor_id': reviewer_id, 'action': decision,
+            'reason': reason or None, 'created_at': reviewed_at,
+        })
+        return _public(document | changes)
+    except HTTPException:
+        raise
+    except PyMongoError as exc:
+        raise HTTPException(503, '카드 승인 결과를 저장하지 못했습니다.') from exc
+
+
+def submit_draft(submission_id, owner_id, actor_id=None):
+    actor_id = actor_id or owner_id
+    try:
+        collection = _collection()
+        document = collection.find_one({'_id': submission_id, 'owner_id': owner_id}, IMAGE_METADATA)
+        if not document:
+            raise HTTPException(404, '임시 저장한 카드를 찾을 수 없습니다.')
+        if document['status'] != 'draft':
+            raise HTTPException(409, '작성 중인 카드만 승인을 요청할 수 있습니다.')
+        submitted_at = datetime.now(timezone.utc)
+        next_status = 'approved' if document['visibility'] == 'private' else 'pending'
+        changes = {'status': next_status, 'submitted_at': submitted_at}
+        result = collection.update_one({'_id': submission_id, 'owner_id': owner_id, 'status': 'draft',
+                                        **_edit_condition(document)},
+                                       {'$set': changes, '$inc': {'edit_revision': 1}})
+        _require_updated(result)
+        _audit_collection().insert_one({
+            'schema_version': SCHEMA_VERSION,
+            '_id': str(uuid4()), 'card_submission_id': submission_id,
+            'actor_id': actor_id,
+            'action': 'private_activated' if next_status == 'approved' else 'pending',
+            'reason': None, 'created_at': submitted_at,
+        })
+        return _public(document | changes)
+    except HTTPException:
+        raise
+    except PyMongoError as exc:
+        raise HTTPException(503, '카드 승인 요청을 저장하지 못했습니다.') from exc
+
+
+def update_submission(submission_id, owner_id, label, meaning, category, visibility,
+                      actor_id=None):
+    actor_id = actor_id or owner_id
+    label = label.strip()
+    category = category.strip()
+    if not label or not category:
+        raise HTTPException(422, '카드명과 카테고리를 입력해 주세요.')
+    if category not in active_category_names():
+        raise HTTPException(422, '사용할 수 없는 카드 카테고리입니다.')
+    if visibility not in {'private', 'shared'}:
+        raise HTTPException(422, '공개 범위가 올바르지 않습니다.')
+    try:
+        collection = _collection()
+        document = collection.find_one({'_id': submission_id, 'owner_id': owner_id}, IMAGE_METADATA)
+        if not document:
+            raise HTTPException(404, '수정할 카드를 찾을 수 없습니다.')
+        meaning = _card_meaning(label, meaning, document)
+        _validate_text(label, meaning, visibility)
+        if document['status'] not in {'draft', 'rejected'}:
+            raise HTTPException(409, '작성 중이거나 반려된 카드만 수정할 수 있습니다.')
+        normalized_label = _compact_text(label)
+        _ensure_unique_label(collection, normalized_label, owner_id, visibility, submission_id)
+        updated_at = datetime.now(timezone.utc)
+        changes = {
+            'label': label, 'normalized_label': normalized_label, 'meaning': meaning,
+            'language_flags': review_language(label, meaning),
+            'category': category, 'visibility': visibility, 'status': 'draft',
+            'review_reason': None, 'reviewer_id': None, 'reviewed_at': None,
+            'updated_at': updated_at,
+        }
+        result = collection.update_one({'_id': submission_id, 'owner_id': owner_id,
+                                        'status': document['status'], **_edit_condition(document)},
+                                       {'$set': changes, '$inc': {'edit_revision': 1}})
+        _require_updated(result)
+        _audit_collection().insert_one({
+            'schema_version': SCHEMA_VERSION,
+            '_id': str(uuid4()), 'card_submission_id': submission_id,
+            'actor_id': actor_id, 'action': 'updated',
+            'reason': None, 'created_at': updated_at,
+        })
+        return _public(document | changes)
+    except HTTPException:
+        raise
+    except PyMongoError as exc:
+        raise HTTPException(503, '카드 수정 내용을 저장하지 못했습니다.') from exc
+
+
+def approved_cards_for(owner_id, *, shared_only=False):
+    try:
+        public = {'visibility': 'shared', 'status': 'approved'}
+        query = public if shared_only or owner_id is None else {'$or': [public,
+            {'visibility': 'private', 'owner_id': owner_id, 'status': {'$in': ['approved', 'pending']}}]}
+        visible = _collection().find(query, IMAGE_METADATA).sort('created_at', 1)
+        return [with_inferred_metadata({
+            'id': f"custom:{row['_id']}", 'label': row['label'], 'meaning': row['meaning'],
+            'symbol': '🖼️', 'category': row['category'], 'image_index': None,
+            'image_filename': row.get('image', {}).get('filename'),
+            'image_url': f"/api/cards/submissions/{row['_id']}/image", 'custom': True,
+            'thumbnail_url': f"/api/cards/submissions/{row['_id']}/image?variant=thumbnail&v={row.get('thumbnail', {}).get('version', 'legacy')}",
+        }) for row in visible]
+    except PyMongoError as exc:
+        raise HTTPException(503, '사용자 카드를 불러오지 못했습니다.') from exc
+
+
+def image_for(submission_id, requester, variant='display'):
+    try:
+        document = _collection().find_one({'_id': submission_id}, {'original_image': 0})
+        if not document:
+            raise HTTPException(404, '카드 이미지를 찾을 수 없습니다.')
+        from app.services.authentication import require_account_permission
+        try:
+            require_account_permission(requester, 'content_manage')
+            can_review = document['visibility'] == 'shared'
+        except HTTPException:
+            can_review = False
+        try:
+            from app.services.support_links import require_link_permission
+            require_link_permission(requester, document['owner_id'], 'cards_manage')
+            can_manage = True
+        except HTTPException:
+            can_manage = False
+        can_use = ((document['visibility'] == 'shared' and document['status'] == 'approved')
+                   or document['owner_id'] == requester['id'])
+        if not can_review and not can_use and not can_manage:
+            raise HTTPException(403, '이 카드 이미지를 볼 수 없습니다.')
+        image = document.get('thumbnail', document['image']) if variant == 'thumbnail' else document['image']
+        return image['data'], image['content_type']
+    except HTTPException:
+        raise
+    except PyMongoError as exc:
+        raise HTTPException(503, '카드 이미지를 불러오지 못했습니다.') from exc

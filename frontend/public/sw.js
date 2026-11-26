@@ -1,0 +1,41 @@
+const CACHE_NAME = 'pecsmate-shell-v2';
+const APP_SHELL = ['/', '/index.html', '/manifest.webmanifest'];
+
+self.addEventListener('install', event => {
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)));
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(caches.keys().then(keys => Promise.all(
+    keys.filter(key => (key.startsWith('pecsmate-shell-') || key.startsWith('pesc-mate-shell-')) && key !== CACHE_NAME).map(key => caches.delete(key)),
+  )));
+  self.clients.claim();
+});
+
+self.addEventListener('message', event => {
+  if (event.data?.type !== 'CACHE_ASSETS' || !Array.isArray(event.data.urls)) return;
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => Promise.all(
+    [...new Set(event.data.urls)].map(url => cache.add(url).catch(() => null)),
+  )));
+});
+
+self.addEventListener('fetch', event => {
+  const request = event.request;
+  const url = new URL(request.url);
+  if (request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
+  // The generated public pack can be published after the app shell was cached.
+  // Its catalog must be fresh; offline child speech restores its catalog from IndexedDB.
+  if (url.pathname === '/audio/core/v2/manifest.json') return;
+  if (request.mode === 'navigate') {
+    event.respondWith(fetch(request).then(response => {
+      if (response.ok) caches.open(CACHE_NAME).then(cache => cache.put('/index.html', response.clone()));
+      return response;
+    }).catch(() => caches.match('/index.html')));
+    return;
+  }
+  event.respondWith(caches.match(request).then(cached => cached || fetch(request).then(response => {
+    if (response.ok) caches.open(CACHE_NAME).then(cache => cache.put(request, response.clone()));
+    return response;
+  })));
+});

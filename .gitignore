@@ -1,0 +1,66 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/test-results/
+frontend/public/audio/core/v2/
+
+# Local MongoDB backups (private BSON, never commit)
+.local-backups/
+.local-audit/
+.local-security-tests/
+.local-validation/
+.local-voice-design/
+
+# Local presentation rehearsal notes
+/PRESENTATION_REHEARSAL.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+reference/
+# Environment variables
+# Arduino credentials and local build output
+hardware/**/arduino_secrets.h
+hardware/**/build/
+.env
+.env.*
+
+# IDE and OS
+.codex/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+.png
+!frontend/src/assets/cards/*.png
+!frontend/src/assets/profiles/*.png
+
+# oh-my-agent runtime (local artifacts — do not commit)
+.agents/oma-config.local.cue
+.agents/oma-config.local.yaml
+.antigravitycli/
+.agents/results/
+.agents/state/
+.agents/backup/
+docs/plans/
+.migration-backup/
+.qwen/tmp/
+.serena
+.zcode
+.kilo
+.kimi-code
+.kiro
+.opencode
+.pi
+.qwen
+.grok
+.github
+.cursor
+.commandcode
+.agents
+.githooks
+AGENTS.md
+.codex
